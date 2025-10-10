@@ -1,0 +1,116 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* F1 Digital Twin Design System - Clean, minimal, racing-inspired */
+
+@layer base {
+  :root {
+    /* F1 Racing Color Palette */
+    --background: 220 13% 9%;
+    --foreground: 0 0% 95%;
+
+    --card: 220 13% 11%;
+    --card-foreground: 0 0% 95%;
+
+    --popover: 220 13% 11%;
+    --popover-foreground: 0 0% 95%;
+
+    --primary: 0 84% 58%;
+    --primary-foreground: 0 0% 98%;
+
+    --secondary: 220 13% 15%;
+    --secondary-foreground: 0 0% 90%;
+
+    --muted: 220 13% 15%;
+    --muted-foreground: 220 9% 55%;
+
+    --accent: 0 84% 58%;
+    --accent-foreground: 0 0% 98%;
+
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 98%;
+
+    --border: 220 13% 20%;
+    --input: 220 13% 15%;
+    --ring: 0 84% 58%;
+
+    /* F1 Specific Colors */
+    --f1-red: 0 84% 58%;
+    --f1-silver: 0 0% 75%;
+    --f1-orange: 25 95% 53%;
+    --f1-blue: 210 100% 56%;
+    --f1-green: 120 61% 50%;
+    
+    /* Sensor Colors */
+    --sensor-temp: 0 84% 58%;
+    --sensor-pressure: 210 100% 56%;
+    --sensor-thickness: 25 95% 53%;
+    --sensor-speed: 120 61% 50%;
+    
+    /* Effects */
+    --glow-red: 0 84% 58%;
+    --glow-intensity: 0.6;
+    
+    /* Gradients */
+    --gradient-primary: linear-gradient(135deg, hsl(var(--primary)), hsl(0 84% 45%));
+    --gradient-surface: linear-gradient(145deg, hsl(var(--card)), hsl(220 13% 13%));
+    
+    /* Shadows */
+    --shadow-glow: 0 0 20px hsl(var(--glow-red) / var(--glow-intensity));
+    --shadow-card: 0 4px 20px hsl(220 13% 5% / 0.3);
+
+    --radius: 0.5rem;
+
+    --sidebar-background: 0 0% 98%;
+
+    --sidebar-foreground: 240 5.3% 26.1%;
+
+    --sidebar-primary: 240 5.9% 10%;
+
+    --sidebar-primary-foreground: 0 0% 98%;
+
+    --sidebar-accent: 240 4.8% 95.9%;
+
+    --sidebar-accent-foreground: 240 5.9% 10%;
+
+    --sidebar-border: 220 13% 91%;
+
+    --sidebar-ring: 217.2 91.2% 59.8%;
+  }
+
+  /* No separate dark mode - F1 theme is always dark */
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-weight: 400;
+    overflow-x: hidden;
+  }
+  
+  /* F1 Custom Utilities */
+  .sensor-glow {
+    box-shadow: var(--shadow-glow);
+  }
+  
+  .gradient-primary {
+    background: var(--gradient-primary);
+  }
+  
+  .gradient-surface {
+    background: var(--gradient-surface);
+  }
+  
+  /* Smooth transitions for all interactions */
+  .transition-smooth {
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+}
