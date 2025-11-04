@@ -13,12 +13,26 @@ export interface HFRowsResponse {
 const DEFAULT_DATASET = 'Draichi/Formula1-2024-Miami-Verstappen-telemetry';
 
 export async function fetchHuggingFaceRows(datasetId: string = DEFAULT_DATASET, split: string = 'train', length: number = 100): Promise<HFRowsResponse> {
-  const base = '/hf/rows'; // proxied by Vite dev-server
+  // Use Vite proxy in development, Vercel API route in production
+  const isDev = import.meta.env.DEV;
+  const base = isDev ? '/hf/rows' : '/api/hf-proxy';
   const url = `${base}?dataset=${encodeURIComponent(datasetId)}&config=default&split=${encodeURIComponent(split)}&offset=0&length=${length}`;
-  const res = await fetch(url, { headers: { 'Accept': 'application/json' } });
+  
+  const res = await fetch(url, { 
+    headers: { 'Accept': 'application/json' },
+    mode: 'same-origin' // Both dev proxy and Vercel API are same-origin
+  });
+  
   if (!res.ok) {
     const text = await res.text().catch(() => '');
-    throw new Error(`HF rows fetch failed: ${res.status} ${res.statusText}${text ? ` - ${text.slice(0, 200)}` : ''}`);
+    let errorMsg = `HF rows fetch failed: ${res.status} ${res.statusText}`;
+    try {
+      const errorJson = JSON.parse(text);
+      errorMsg += ` - ${errorJson.error || errorJson.message || text.slice(0, 200)}`;
+    } catch {
+      errorMsg += text ? ` - ${text.slice(0, 200)}` : '';
+    }
+    throw new Error(errorMsg);
   }
   return res.json();
 }
