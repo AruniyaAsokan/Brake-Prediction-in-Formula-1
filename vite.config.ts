@@ -8,6 +8,13 @@ export default defineConfig(({ mode }) => ({
   server: {
     host: "::",
     port: 8080,
+    proxy: {
+      "/hf": {
+        target: "https://datasets-server.huggingface.co",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/hf/, ""),
+      },
+    },
   },
   plugins: [react(), mode === "development" && componentTagger()].filter(Boolean),
   resolve: {

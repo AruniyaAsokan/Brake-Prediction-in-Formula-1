@@ -256,11 +256,11 @@ export class HybridDigitalTwin {
     const mlContrib = [
       `Pattern recognition: Historical sequence analysis`,
       `Non-linear relationships: Learned from training data`,
-      `Temporal dependencies: LSTM memory of past ${this.lstmModel.getModelInfo().sequenceLength} steps`
+      `Temporal dependencies: Bi-LSTM memory of past ${this.lstmModel.getModelInfo().sequenceLength} steps`
     ];
 
     const confidenceFactors = [
-      `LSTM confidence: ${(prediction.confidence * 100).toFixed(1)}%`,
+      `Bi-LSTM confidence: ${(prediction.confidence * 100).toFixed(1)}%`,
       `Physics weight: ${(prediction.physicsWeight * 100).toFixed(1)}%`,
       `ML weight: ${(prediction.mlWeight * 100).toFixed(1)}%`,
       `Anomaly score: ${(prediction.anomalyScore * 100).toFixed(1)}%`

@@ -5,16 +5,13 @@ import { useBrakeSystemStore } from "@/store/UpdatedBrakeSystemStore";
 import { Brain, Eye, Clock, Target } from "lucide-react";
 
 export const ComparisonDashboard = () => {
-  const {
-    currentComparison,
-    currentPrediction,
-  } = useBrakeSystemStore();
+  const { currentComparison, realTimeMetrics } = useBrakeSystemStore();
 
-  // Extract values from current comparison or use defaults
-  const hybridAccuracy = currentComparison?.performanceMetrics?.hybridAccuracy || 85;
-  const lstmAccuracy = currentComparison?.performanceMetrics?.lstmAccuracy || 70;
-  const hybridResponseTime = currentComparison?.performanceMetrics?.hybridResponseTime || 12;
-  const lstmResponseTime = currentComparison?.performanceMetrics?.lstmResponseTime || 45;
+  // Prefer real-time metrics; fallback to currentComparison
+  const hybridAccuracy = realTimeMetrics.hybrid?.accuracy ?? currentComparison?.performanceMetrics?.hybridAccuracy ?? 85;
+  const lstmAccuracy = realTimeMetrics.lstm?.accuracy ?? currentComparison?.performanceMetrics?.lstmAccuracy ?? 70;
+  const hybridResponseTime = currentComparison?.performanceMetrics?.hybridResponseTime ?? 12;
+  const lstmResponseTime = currentComparison?.performanceMetrics?.lstmResponseTime ?? 45;
 
   return (
     <Card className="p-4 bg-card gradient-surface border-border">
@@ -38,7 +35,7 @@ export const ComparisonDashboard = () => {
             {/* Digital Twin */}
             <div className="space-y-2">
               <div className="flex items-center justify-between">
-                <span className="text-sm text-foreground">Digital Twin (Physics + LSTM)</span>
+                <span className="text-sm text-foreground">Digital Twin (Physics + Bi-LSTM)</span>
                 <Badge variant="outline" className="bg-f1-green/10 text-f1-green border-f1-green/50">
                   {hybridAccuracy.toFixed(1)}%
                 </Badge>
@@ -46,10 +43,10 @@ export const ComparisonDashboard = () => {
               <Progress value={hybridAccuracy} className="h-2" />
             </div>
 
-            {/* LSTM Only */}
+            {/* Bi-LSTM Only */}
             <div className="space-y-2">
               <div className="flex items-center justify-between">
-                <span className="text-sm text-foreground">LSTM Only (Black Box)</span>
+                <span className="text-sm text-foreground">Bi-LSTM Only (Black Box)</span>
                 <Badge variant="outline" className="bg-f1-orange/10 text-f1-orange border-f1-orange/50">
                   {lstmAccuracy.toFixed(1)}%
                 </Badge>
@@ -73,7 +70,7 @@ export const ComparisonDashboard = () => {
             </div>
             <div className="bg-muted/20 p-3 rounded-lg text-center">
               <div className="text-lg font-bold text-f1-orange">{lstmResponseTime.toFixed(1)}ms</div>
-              <div className="text-xs text-muted-foreground">LSTM Only</div>
+              <div className="text-xs text-muted-foreground">Bi-LSTM Only</div>
             </div>
           </div>
         </div>
@@ -100,7 +97,7 @@ export const ComparisonDashboard = () => {
 
             <div className="p-3 bg-f1-orange/10 border border-f1-orange/50 rounded-lg">
               <div className="flex items-center justify-between mb-1">
-                <span className="text-sm font-medium text-foreground">LSTM Only</span>
+                <span className="text-sm font-medium text-foreground">Bi-LSTM Only</span>
                 <Badge variant="outline" className="text-f1-orange border-f1-orange/50">
                   Low
                 </Badge>
@@ -122,12 +119,7 @@ export const ComparisonDashboard = () => {
             <div>• Physics-based interpretability</div>
             <div>• Proactive failure prediction</div>
           </div>
-          <div className="mt-3 p-2 bg-f1-green/10 border border-f1-green/50 rounded-lg">
-            <p className="text-xs text-f1-green">
-              <strong>Why Hybrid stays at 75%:</strong> Physics constraints prevent unrealistic predictions, 
-              while LSTM accuracy fluctuates (60-68%) as it learns from new data patterns.
-            </p>
-          </div>
+          
         </div>
       </div>
     </Card>

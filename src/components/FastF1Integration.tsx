@@ -2,10 +2,10 @@ import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useBrakeSystemStore } from "@/store/UpdatedBrakeSystemStore";
-import { Database, Download, Play } from "lucide-react";
+import { Database, Play, Link as LinkIcon } from "lucide-react";
 
 export const FastF1Integration = () => {
-  const { currentLapNumber, simulateRaceLap } = useBrakeSystemStore();
+  const { currentLapNumber, simulateRaceLap, loadHuggingFaceTelemetry } = useBrakeSystemStore();
 
   const sampleRaces = [
     { name: "Monaco GP 2024", laps: 78, car: "VER" },
@@ -19,10 +19,12 @@ export const FastF1Integration = () => {
     simulateRaceLap(1);
   };
 
+  
+
   return (
     <Card className="p-4 bg-card gradient-surface border-border">
       <div className="flex items-center justify-between mb-4">
-        <h3 className="text-lg font-medium text-foreground">Stage 4: FastF1 Dataset</h3>
+        <h3 className="text-lg font-medium text-foreground">Stage 4: Dataset</h3>
         <div className="flex items-center space-x-2">
           <Database className="w-4 h-4 text-f1-blue" />
           <span className="text-sm text-f1-blue">Race Data</span>
@@ -30,6 +32,21 @@ export const FastF1Integration = () => {
       </div>
 
       <div className="space-y-4">
+
+        {/* Load directly from Hugging Face */}
+        <div className="flex items-center justify-between p-3 bg-muted/20 rounded-lg border border-border/50">
+          <div className="flex items-center space-x-2">
+            <LinkIcon className="w-4 h-4 text-f1-green" />
+            <div>
+              <div className="text-sm font-medium text-foreground">Load Miami VER Telemetry (Hugging Face)</div>
+              <div className="text-xs text-muted-foreground">Draichi/Formula1-2024-Miami-Verstappen-telemetry</div>
+            </div>
+          </div>
+          <Button size="sm" variant="outline" onClick={() => loadHuggingFaceTelemetry('Draichi/Formula1-2024-Miami-Verstappen-telemetry', 100)}>
+            Fetch
+          </Button>
+        </div>
+
         {/* Sample Race Data */}
         <div className="space-y-2">
           <h4 className="text-sm font-medium text-foreground mb-2">Available Race Data</h4>
@@ -59,46 +76,51 @@ export const FastF1Integration = () => {
           ))}
         </div>
 
-        {/* Synthetic Data Generation */}
+        {/* Dataset Info & Validation (Real Data) */}
         <div className="pt-3 border-t border-border/50">
-          <h4 className="text-sm font-medium text-foreground mb-2">Synthetic Data</h4>
-          <div className="p-3 bg-f1-orange/10 border border-f1-orange/50 rounded-lg">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-sm font-medium text-foreground">Missing Brake Data Generation</span>
-              <Badge variant="outline" className="text-f1-orange border-f1-orange/50">
-                Active
-              </Badge>
-            </div>
-            <p className="text-xs text-muted-foreground mb-2">
-              FastF1 telemetry often lacks brake-specific data. Our system generates realistic brake parameters using:
-            </p>
+          <h4 className="text-sm font-medium text-foreground mb-2">Dataset & Validation</h4>
+          <div className="p-3 bg-f1-green/10 border border-f1-green/50 rounded-lg">
             <div className="text-xs text-muted-foreground space-y-1">
-              <div>• Speed-based temperature modeling (T = f(v, a, t))</div>
-              <div>• Braking zone detection algorithms (GPS + speed analysis)</div>
-              <div>• Track-specific wear patterns (Monaco: high wear, Spa: medium)</div>
-              <div>• Weather condition adjustments (wet: +20% wear, dry: baseline)</div>
-              <div>• Driver style analysis (aggressive vs conservative braking)</div>
-              <div>• Material properties (carbon-carbon vs steel discs)</div>
+              <div>• Source: Hugging Face – Draichi/Formula1-2024-Miami-Verstappen-telemetry</div>
+              <div>• Fields used: Time (Timedelta), Speed (km/h), Brake (bool), RPM, nGear, Throttle</div>
+              <div>• Mapping: wheelSpeed (from Speed via tyre radius), brakePressure (estimated from Brake + Speed), ambient set from UI</div>
+              <div>• Sanity checks: non-negative speeds, Time monotonic, Speed 0–350 km/h, boolean Brake</div>
+              <div>• Model metrics shown in Comparison: RMSE/MAE/R² + calibration on real rows</div>
             </div>
           </div>
         </div>
 
-        {/* Data Validation */}
+        {/* Real-time Comparison & Metrics (formulas) */}
         <div className="pt-3 border-t border-border/50">
-          <h4 className="text-sm font-medium text-foreground mb-2">Data Validation</h4>
-          <div className="p-3 bg-f1-green/10 border border-f1-green/50 rounded-lg">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-sm font-medium text-foreground">Synthetic Data Quality</span>
-              <Badge variant="outline" className="text-f1-green border-f1-green/50">
-                Validated
-              </Badge>
+          <h4 className="text-sm font-medium text-foreground mb-2">Real-time Model Comparison (Temperature)</h4>
+          <div className="p-3 bg-muted/20 border border-border/50 rounded-lg text-xs text-muted-foreground space-y-2">
+            <div>
+              <span className="text-foreground font-medium">Formulas:</span>
+              <div>• MAE = (1/N) Σ |ŷ - y|</div>
+              <div>• RMSE = √[(1/N) Σ (ŷ - y)²]</div>
+              <div>• R² = 1 - Σ(ŷ - y)² / Σ(y - ȳ)²</div>
             </div>
-            <div className="text-xs text-muted-foreground space-y-1">
-              <div>• Temperature range: 25-1200°C (realistic for F1 brakes)</div>
-              <div>• Pressure range: 0-300 bar (F1 hydraulic system)</div>
-              <div>• Wear rate: 0.001-0.1 mm/lap (carbon-carbon pads)</div>
-              <div>• Speed correlation: R² = 0.85 (high correlation with braking)</div>
-              <div>• Physics compliance: All values follow brake thermodynamics</div>
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-foreground">
+              <div className="p-2 rounded bg-card/60 border border-border/50">
+                <div className="text-[11px] text-muted-foreground mb-1">Physics (proxy truth)</div>
+                <div className="text-sm font-medium">—</div>
+              </div>
+              <div className="p-2 rounded bg-card/60 border border-border/50">
+                <div className="text-[11px] text-muted-foreground mb-1">Hybrid (Physics + Bi-LSTM)</div>
+                <DynamicMetric label="Hybrid" />
+              </div>
+              <div className="p-2 rounded bg-card/60 border border-border/50">
+                <div className="text-[11px] text-muted-foreground mb-1">Bi-LSTM</div>
+                <DynamicMetric label="Bi-LSTM" />
+              </div>
+              <div className="p-2 rounded bg-card/60 border border-border/50">
+                <div className="text-[11px] text-muted-foreground mb-1">GRU</div>
+                <DynamicMetric label="GRU" />
+              </div>
+              <div className="p-2 rounded bg-card/60 border border-border/50">
+                <div className="text-[11px] text-muted-foreground mb-1">TCN</div>
+                <DynamicMetric label="TCN" />
+              </div>
             </div>
           </div>
         </div>
@@ -117,3 +139,21 @@ export const FastF1Integration = () => {
     </Card>
   );
 };
+
+function DynamicMetric({ label }: { label: string }) {
+  const { realTimeMetrics } = useBrakeSystemStore();
+  const m = label === 'Hybrid' ? realTimeMetrics.hybrid : 
+            label === 'Bi-LSTM' ? realTimeMetrics.lstm :
+            label === 'GRU' ? realTimeMetrics.gru :
+            label === 'TCN' ? realTimeMetrics.tcn : null;
+  
+  if (!m) return <div className="text-sm font-medium">—</div>;
+  
+  return (
+    <div className="space-y-1">
+      <div className="text-sm font-medium">{m.accuracy.toFixed(1)}% acc</div>
+      <div className="text-[10px] text-muted-foreground">MAE: {m.mae.toFixed(1)}</div>
+      <div className="text-[10px] text-muted-foreground">R²: {m.r2.toFixed(3)}</div>
+    </div>
+  );
+}

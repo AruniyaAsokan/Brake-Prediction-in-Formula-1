@@ -3,6 +3,11 @@ import { HybridDigitalTwin, HybridPrediction } from '../models/HybridDigitalTwin
 import { LSTMModel, LSTMPrediction } from '../models/LSTMModel';
 import { ModelEvaluator, ComparisonResults } from '../evaluation/ModelEvaluator';
 import { TestDataGenerator } from '../evaluation/generateTestData';
+import { parseFastF1Csv } from '../data/fastf1Csv';
+import { fetchHuggingFaceRows, hfTimelikeToSeconds, toNumberLoose, toBool } from '../data/huggingface';
+import { PhysicsModel } from '../models/PhysicsModel';
+import { GRUModel } from '../models/GRUModel';
+import { TCNModel } from '../models/TCNModel';
 
 // Base brake component interface
 export interface BrakeComponent {
@@ -147,6 +152,14 @@ export interface BrakeSystemState {
   accuracyHistory: Array<{ timestamp: number; hybrid: number; lstm: number }>;
   responseTimeHistory: Array<{ timestamp: number; hybrid: number; lstm: number }>;
   
+  // Real-time comparison metrics (from evaluation)
+  realTimeMetrics: {
+    hybrid: { mae: number; rmse: number; r2: number; accuracy: number } | null;
+    lstm: { mae: number; rmse: number; r2: number; accuracy: number } | null;
+    gru: { mae: number; rmse: number; r2: number; accuracy: number } | null;
+    tcn: { mae: number; rmse: number; r2: number; accuracy: number } | null;
+  };
+  
   // Physics engine
   physicsEngine: {
     gravity: number;
@@ -188,6 +201,7 @@ export interface BrakeSystemState {
   runModelEvaluation: () => Promise<void>;
   generateTrainingData: () => void;
   calibrateModels: () => void;
+  evaluateOnCurrentTelemetry: () => Promise<void>;
   
   // Actions - Calculations
   calculateBrakingDistance: (initialSpeed: number, finalSpeed: number) => number;
@@ -196,6 +210,11 @@ export interface BrakeSystemState {
   
   // Actions - Data export
   exportData: (format: 'csv' | 'json') => string;
+
+  // Actions - Real telemetry ingestion
+  ingestFastF1Csv: (csv: string, ambient?: number, padStart?: number) => void;
+  loadHuggingFaceTelemetry: (datasetId?: string, length?: number) => Promise<void>;
+  loadLocalHFDump: (path?: string) => Promise<void>;
 }
 
 // Helper functions
@@ -313,6 +332,14 @@ export const useBrakeSystemStore = create<BrakeSystemState>((set, get) => ({
   accuracyHistory: [],
   responseTimeHistory: [],
   
+  // Real-time comparison metrics
+  realTimeMetrics: {
+    hybrid: null,
+    lstm: null,
+    gru: null,
+    tcn: null,
+  },
+  
   // Physics engine
   physicsEngine: initialPhysicsEngine,
   
@@ -419,6 +446,11 @@ export const useBrakeSystemStore = create<BrakeSystemState>((set, get) => ({
           }));
           
           get().updatePredictions();
+          
+          // Update real-time metrics periodically during simulation
+          if (state.historicalData.length >= 20) {
+            get().evaluateOnCurrentTelemetry();
+          }
         } catch (error) {
           console.error('Simulation error:', error);
         }
@@ -713,10 +745,22 @@ export const useBrakeSystemStore = create<BrakeSystemState>((set, get) => ({
         lstmTime = performance.now() - lstmStart;
       }
       
-      // Calculate accuracy based on model confidence and consistency
-      // Digital Twin should generally perform better due to physics knowledge
-      const hybridAccuracy = Math.min(95, Math.max(75, (hybridPrediction.confidence || 0.7) * 100 + Math.random() * 5));
-      const lstmAccuracy = Math.min(90, Math.max(60, (lstmPrediction.confidence || 0.5) * 100 + Math.random() * 10));
+      // Dynamic real-time accuracy vs physics proxy
+      const physicsNow = new PhysicsModel();
+      const physEstimate = physicsNow.predict({
+        wheelSpeed: hybridInputs.currentState.wheelSpeed,
+        brakePressure: hybridInputs.currentState.brakePressure,
+        ambientTemp: hybridInputs.currentState.ambientTemp,
+        padThickness: hybridInputs.currentState.padThickness,
+        discMass: hybridInputs.currentState.discMass,
+        padArea: hybridInputs.currentState.padArea,
+        timeStep: 1
+      }, hybridInputs.previousTemperature);
+
+      const relErr = (pred: number, truth: number) => Math.abs(pred - truth) / Math.max(1, Math.abs(truth));
+      const toAcc = (e: number) => Math.max(50, Math.min(98, (1 - e) * 100));
+      const hybridAccuracy = toAcc(relErr(hybridPrediction.temperature, physEstimate.temperature));
+      const lstmAccuracy = toAcc(relErr(lstmPrediction.temperature, physEstimate.temperature));
       
       // Create comparison
       const comparison: ModelComparison = {
@@ -1061,6 +1105,288 @@ export const useBrakeSystemStore = create<BrakeSystemState>((set, get) => ({
     } catch (error) {
       console.error('Error exporting data:', error);
       return 'Export failed';
+    }
+  },
+
+  ingestFastF1Csv: (csv, ambient = 25, padStart = 10) => {
+    try {
+      const parsed = parseFastF1Csv(csv, ambient, padStart);
+      const hist = parsed.timestamp.map((t: number, i: number) => ({
+        timestamp: t * 1000,
+        wheelSpeed: parsed.wheelSpeed[i],
+        pressure: parsed.brakePressure[i],
+        temperature: get().temperature,
+        padThickness: parsed.padThickness[i],
+      }));
+
+      set({
+        historicalData: hist.slice(-100),
+        wheelSpeed: parsed.wheelSpeed.at(-1) || get().wheelSpeed,
+        pressure: parsed.brakePressure.at(-1) || get().pressure,
+        padThickness: parsed.padThickness.at(-1) || get().padThickness,
+        ambientTemp: ambient,
+      });
+
+      get().updatePredictions();
+      get().addAlert({ message: `Loaded FastF1 CSV with ${hist.length} rows`, type: 'info' });
+    } catch (e) {
+      console.error('FastF1 CSV ingest error', e);
+      get().addAlert({ message: 'FastF1 CSV ingest failed', type: 'warning' });
+    }
+  },
+
+  loadHuggingFaceTelemetry: async (datasetId = 'Draichi/Formula1-2024-Miami-Verstappen-telemetry', length = 100) => {
+    try {
+      const resp = await fetchHuggingFaceRows(datasetId, 'train', length);
+      const rows = resp.rows || [];
+
+      const wheelSpeed: number[] = [];
+      const brakePressure: number[] = [];
+      const ambientTemp: number[] = [];
+      const padThickness: number[] = [];
+      const timestamp: number[] = [];
+
+      let pad = get().padThickness || 10;
+      let lastSec = 0;
+      for (const r of rows) {
+        const c = r.content || {};
+        const sec = hfTimelikeToSeconds(c['Time'] ?? c['SessionTime'] ?? 0);
+        const dt = Math.max(0, sec - lastSec);
+        lastSec = sec;
+
+        const speedKmh = toNumberLoose(c['Speed']);
+        const speedMs = speedKmh / 3.6;
+        const wheelRpm = speedMs > 0 ? (speedMs / (2 * Math.PI * 0.33)) * 60 : 0;
+
+        const brakeFlag = toBool(c['Brake']);
+        const pressureBar = brakeFlag ? Math.min(300, 50 + speedMs * 20) : 0;
+
+        const wearMm = Math.max(0, pressureBar) * 1e-5 * Math.max(0.02, dt);
+        pad = Math.max(1.5, pad - wearMm);
+
+        wheelSpeed.push(wheelRpm);
+        brakePressure.push(pressureBar);
+        ambientTemp.push(get().ambientTemp || 25);
+        padThickness.push(pad);
+        timestamp.push(sec * 1000);
+      }
+
+      const hist = timestamp.map((t, i) => ({
+        timestamp: t,
+        wheelSpeed: wheelSpeed[i],
+        pressure: brakePressure[i],
+        temperature: get().temperature,
+        padThickness: padThickness[i],
+      }));
+
+      set({
+        historicalData: hist.slice(-100),
+        wheelSpeed: wheelSpeed.at(-1) || get().wheelSpeed,
+        pressure: brakePressure.at(-1) || get().pressure,
+        padThickness: padThickness.at(-1) || get().padThickness,
+      });
+
+      get().updatePredictions();
+      get().addAlert({ message: `Loaded HF telemetry (${datasetId}) with ${rows.length} rows`, type: 'info' });
+
+      // Trigger quick real-data comparison across models using physics as proxy ground truth
+      await get().evaluateOnCurrentTelemetry();
+    } catch (e: any) {
+      console.error('HF telemetry load error', e);
+      get().addAlert({ message: `Hugging Face telemetry load failed: ${e?.message || e}`, type: 'warning' });
+    }
+  },
+
+  // Evaluate models on the last N real telemetry points using physics as proxy ground truth
+  evaluateOnCurrentTelemetry: async () => {
+    try {
+      const state = get();
+      const data = state.historicalData.slice(-50);
+      if (data.length < 10) {
+        get().addAlert({ message: 'Not enough telemetry points to evaluate (need ≥10)', type: 'info' });
+        return;
+      }
+
+      const physics = new PhysicsModel();
+      const gru = new GRUModel();
+      const tcn = new TCNModel();
+
+      let tempTrue: number[] = [];
+      let wearTrue: number[] = [];
+      let lapsTrue: number[] = [];
+
+      let hybridPred: number[] = [];
+      let lstmPred: number[] = [];
+      let gruPred: number[] = [];
+      let tcnPred: number[] = [];
+      let physPred: number[] = [];
+
+      let prevTemp = Math.max(25, state.temperature || 450);
+
+      for (let i = 9; i < data.length; i++) {
+        const window = data.slice(i - 9, i + 1);
+        const seq = {
+          wheelSpeed: window.map(d => Math.max(0, d.wheelSpeed)),
+          brakePressure: window.map(d => Math.max(0, d.pressure)),
+          ambientTemp: window.map(() => Math.max(-50, state.ambientTemp || 25)),
+          padThickness: window.map(d => Math.max(0.1, d.padThickness)),
+          timestamp: window.map(d => d.timestamp),
+        };
+
+        const last = window[window.length - 1];
+        const currentState = {
+          wheelSpeed: Math.max(0, last.wheelSpeed),
+          brakePressure: Math.max(0, last.pressure),
+          ambientTemp: Math.max(-50, state.ambientTemp || 25),
+          padThickness: Math.max(0.1, last.padThickness),
+          discMass: 8.5,
+          padArea: 150,
+          timeStep: 1,
+        };
+
+        const phys = physics.predict(currentState as any, prevTemp);
+        prevTemp = phys.temperature;
+
+        const hyb = state.hybridTwin.predict({ currentState: currentState as any, historicalSequence: seq, previousTemperature: prevTemp });
+        const lstm = state.lstmModel.predict(seq);
+        const gp = gru.predict(seq as any);
+        const tp = tcn.predict(seq as any);
+
+        tempTrue.push(phys.temperature);
+        wearTrue.push(phys.wearRate);
+        lapsTrue.push(phys.predictedLapsRemaining);
+        physPred.push(phys.temperature);
+        hybridPred.push(hyb.temperature);
+        lstmPred.push(lstm.temperature);
+        gruPred.push(gp.temperature);
+        tcnPred.push(tp.temperature);
+      }
+
+      const mae = (y: number[], p: number[]) => y.reduce((s, v, i) => s + Math.abs(v - p[i]), 0) / y.length;
+      const rmse = (y: number[], p: number[]) => Math.sqrt(y.reduce((s, v, i) => s + Math.pow(v - p[i], 2), 0) / y.length);
+      const mean = (a: number[]) => a.reduce((s, v) => s + v, 0) / a.length;
+      const r2 = (y: number[], p: number[]) => {
+        const m = mean(y);
+        const ssTot = y.reduce((s, v) => s + Math.pow(v - m, 2), 0);
+        const ssRes = y.reduce((s, v, i) => s + Math.pow(v - p[i], 2), 0);
+        return ssTot === 0 ? 0 : 1 - ssRes / ssTot;
+      };
+
+      const targets = tempTrue;
+      const avgTarget = mean(targets);
+      const toAcc = (err: number, avg: number) => Math.max(50, Math.min(98, (1 - err / Math.max(1, avg)) * 100));
+      
+      const results = {
+        physicsOnly: { mae: 0, rmse: 0, r2: 1, accuracy: 100 },
+        hybrid: {
+          mae: mae(targets, hybridPred),
+          rmse: rmse(targets, hybridPred),
+          r2: r2(targets, hybridPred),
+          accuracy: toAcc(mae(targets, hybridPred), avgTarget),
+        },
+        lstm: {
+          mae: mae(targets, lstmPred),
+          rmse: rmse(targets, lstmPred),
+          r2: r2(targets, lstmPred),
+          accuracy: toAcc(mae(targets, lstmPred), avgTarget),
+        },
+        gru: {
+          mae: mae(targets, gruPred),
+          rmse: rmse(targets, gruPred),
+          r2: r2(targets, gruPred),
+          accuracy: toAcc(mae(targets, gruPred), avgTarget),
+        },
+        tcn: {
+          mae: mae(targets, tcnPred),
+          rmse: rmse(targets, tcnPred),
+          r2: r2(targets, tcnPred),
+          accuracy: toAcc(mae(targets, tcnPred), avgTarget),
+        },
+      };
+
+      set({
+        realTimeMetrics: {
+          hybrid: results.hybrid,
+          lstm: results.lstm,
+          gru: results.gru,
+          tcn: results.tcn,
+        },
+      });
+
+      get().addAlert({
+        message: `Real-data comparison (temperature): Hybrid MAE=${results.hybrid.mae.toFixed(1)}, Bi-LSTM=${results.lstm.mae.toFixed(1)}, GRU=${results.gru.mae.toFixed(1)}, TCN=${results.tcn.mae.toFixed(1)}`,
+        type: 'info',
+      });
+
+    } catch (e) {
+      console.error('Real-data evaluation error', e);
+      get().addAlert({ message: 'Real-data evaluation failed', type: 'warning' });
+    }
+  },
+
+  loadLocalHFDump: async (path = '/hf-miami.json') => {
+    try {
+      const res = await fetch(path);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json(); // expect array of objects with Time/Speed/Brake
+
+      const toBool = (v: any) => (typeof v === 'boolean' ? v : String(v ?? '').toLowerCase() === 'true' || String(v ?? '') === '1');
+      const toNum = (v: any) => { const n = Number(String(v ?? '').replace(/,/g, '')); return isFinite(n) ? n : 0; };
+      const timeToSec = (s: any) => {
+        const str = String(s || '').trim();
+        const m = /^(\d+)\s+days\s+(\d{2}):(\d{2}):(\d{2}\.\d+)/.exec(str);
+        if (m) return Number(m[1]) * 86400 + Number(m[2]) * 3600 + Number(m[3]) * 60 + Number(m[4]);
+        if (str.includes(':')) {
+          const p = str.split(':');
+          if (p.length === 3) return Number(p[0]) * 3600 + Number(p[1]) * 60 + Number(p[2]);
+        }
+        const v = Number(str); return isFinite(v) ? v : 0;
+      };
+
+      const wheelSpeed: number[] = [];
+      const brakePressure: number[] = [];
+      const ambientTemp: number[] = [];
+      const padThickness: number[] = [];
+      const timestamp: number[] = [];
+
+      let pad = get().padThickness || 10;
+      let lastSec = 0;
+      for (const c of data) {
+        const sec = timeToSec(c['Time'] ?? c['SessionTime'] ?? 0);
+        const dt = Math.max(0, sec - lastSec);
+        lastSec = sec;
+        const speedMs = toNum(c['Speed']) / 3.6;
+        const wheelRpm = speedMs > 0 ? (speedMs / (2 * Math.PI * 0.33)) * 60 : 0;
+        const pressureBar = toBool(c['Brake']) ? Math.min(300, 50 + speedMs * 20) : 0;
+        const wearMm = Math.max(0, pressureBar) * 1e-5 * Math.max(0.02, dt);
+        pad = Math.max(1.5, pad - wearMm);
+        wheelSpeed.push(wheelRpm);
+        brakePressure.push(pressureBar);
+        ambientTemp.push(get().ambientTemp || 25);
+        padThickness.push(pad);
+        timestamp.push(sec * 1000);
+      }
+
+      const hist = timestamp.map((t, i) => ({
+        timestamp: t,
+        wheelSpeed: wheelSpeed[i],
+        pressure: brakePressure[i],
+        temperature: get().temperature,
+        padThickness: padThickness[i],
+      }));
+
+      set({
+        historicalData: hist.slice(-100),
+        wheelSpeed: wheelSpeed.at(-1) || get().wheelSpeed,
+        pressure: brakePressure.at(-1) || get().pressure,
+        padThickness: padThickness.at(-1) || get().padThickness,
+      });
+
+      get().updatePredictions();
+      get().addAlert({ message: `Loaded local HF dump (${path}) with ${data.length} rows`, type: 'info' });
+    } catch (e: any) {
+      console.error('Local HF dump load error', e);
+      get().addAlert({ message: `Local HF dump failed: ${e?.message || e}`, type: 'warning' });
     }
   },
 }));

@@ -27,7 +27,7 @@ export const Header = () => {
               <span>Stage 1-5: Complete Digital Twin</span>
             </div>
             <div className="flex items-center space-x-2">
-              <span>Real-time Physics • LSTM Comparison • Race Replay</span>
+              <span>Real-time Physics • Bi-LSTM Comparison • Race Replay</span>
             </div>
           </div>
         </div>

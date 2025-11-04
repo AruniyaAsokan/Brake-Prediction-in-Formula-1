@@ -1,5 +1,8 @@
 import { HybridDigitalTwin, HybridPrediction, HybridInputs } from '../models/HybridDigitalTwin';
 import { LSTMModel, LSTMInputSequence, LSTMPrediction } from '../models/LSTMModel';
+import { PhysicsModel } from '../models/PhysicsModel';
+import { GRUModel } from '../models/GRUModel';
+import { TCNModel } from '../models/TCNModel';
 
 export interface TestScenario {
   id: string;
@@ -20,6 +23,9 @@ export interface ModelPerformance {
   interpretability: number; // Score 0-100
   meanAbsoluteError: number;
   rootMeanSquareError: number;
+  r2: number;
+  calibrationECE?: number;
+  calibrationBins?: Array<{ bin: string; confidenceAvg: number; accuracy: number; count: number }>;
   predictions: Array<{
     scenario: string;
     predicted: any;
@@ -32,7 +38,10 @@ export interface ModelPerformance {
 export interface ComparisonResults {
   hybridTwin: ModelPerformance;
   lstmOnly: ModelPerformance;
-  winner: 'hybrid' | 'lstm' | 'tie';
+  physicsOnly: ModelPerformance;
+  gru: ModelPerformance;
+  tcn: ModelPerformance;
+  winner: 'hybrid' | 'lstm' | 'physics' | 'gru' | 'tcn' | 'tie';
   improvements: {
     accuracy: number;
     responseTime: number;
@@ -44,11 +53,17 @@ export interface ComparisonResults {
 export class ModelEvaluator {
   private hybridModel: HybridDigitalTwin;
   private lstmModel: LSTMModel;
+  private physicsModel: PhysicsModel;
+  private gruModel: GRUModel;
+  private tcnModel: TCNModel;
   private testScenarios: TestScenario[] = [];
 
   constructor() {
     this.hybridModel = new HybridDigitalTwin();
     this.lstmModel = new LSTMModel();
+    this.physicsModel = new PhysicsModel();
+    this.gruModel = new GRUModel();
+    this.tcnModel = new TCNModel();
     this.generateTestScenarios();
   }
 
@@ -218,11 +233,20 @@ export class ModelEvaluator {
     // Evaluate Hybrid Digital Twin
     const hybridPerformance = await this.evaluateHybridModel();
     
-    // Evaluate LSTM Only
+    // Evaluate Bi-LSTM Only
     const lstmPerformance = await this.evaluateLSTMModel();
 
+    // Evaluate Physics Only
+    const physicsPerformance = await this.evaluatePhysicsOnly();
+
+    // Evaluate GRU baseline
+    const gruPerformance = await this.evaluateGRUModel();
+
+    // Evaluate TCN baseline
+    const tcnPerformance = await this.evaluateTCNModel();
+
     // Compare results
-    const comparison = this.compareModels(hybridPerformance, lstmPerformance);
+    const comparison = this.compareModels(hybridPerformance, lstmPerformance, physicsPerformance, gruPerformance, tcnPerformance);
 
     return comparison;
   }
@@ -232,6 +256,9 @@ export class ModelEvaluator {
     const responseTimes: number[] = [];
     let totalError = 0;
     let totalSquaredError = 0;
+    const yTrue: number[] = [];
+    const yPred: number[] = [];
+    const confidences: number[] = [];
 
     for (const scenario of this.testScenarios) {
       const startTime = performance.now();
@@ -246,6 +273,9 @@ export class ModelEvaluator {
       const error = Math.abs(prediction.temperature - scenario.groundTruth.temperature) / scenario.groundTruth.temperature;
       totalError += error;
       totalSquaredError += error * error;
+      yTrue.push(scenario.groundTruth.temperature);
+      yPred.push(prediction.temperature);
+      confidences.push(prediction.confidence ?? 0.6);
 
       predictions.push({
         scenario: scenario.name,
@@ -264,6 +294,8 @@ export class ModelEvaluator {
     const rmse = Math.sqrt(totalSquaredError / this.testScenarios.length);
     const accuracy = Math.max(0, (1 - meanError) * 100);
     const avgResponseTime = responseTimes.reduce((a, b) => a + b, 0) / responseTimes.length;
+    const r2 = this.computeR2(yTrue, yPred);
+    const calibration = this.computeCalibrationECE(yTrue, yPred, confidences);
     
     // Interpretability score for hybrid model (high due to physics + explainable ML)
     const interpretability = 85;
@@ -274,6 +306,9 @@ export class ModelEvaluator {
       interpretability,
       meanAbsoluteError: meanError,
       rootMeanSquareError: rmse,
+      r2,
+      calibrationECE: calibration.ece,
+      calibrationBins: calibration.bins,
       predictions
     };
   }
@@ -283,6 +318,9 @@ export class ModelEvaluator {
     const responseTimes: number[] = [];
     let totalError = 0;
     let totalSquaredError = 0;
+    const yTrue: number[] = [];
+    const yPred: number[] = [];
+    const confidences: number[] = [];
 
     for (const scenario of this.testScenarios) {
       const startTime = performance.now();
@@ -297,6 +335,9 @@ export class ModelEvaluator {
       const error = Math.abs(prediction.temperature - scenario.groundTruth.temperature) / scenario.groundTruth.temperature;
       totalError += error;
       totalSquaredError += error * error;
+      yTrue.push(scenario.groundTruth.temperature);
+      yPred.push(prediction.temperature);
+      confidences.push(prediction.confidence ?? 0.5);
 
       predictions.push({
         scenario: scenario.name,
@@ -315,8 +356,10 @@ export class ModelEvaluator {
     const rmse = Math.sqrt(totalSquaredError / this.testScenarios.length);
     const accuracy = Math.max(0, (1 - meanError) * 100);
     const avgResponseTime = responseTimes.reduce((a, b) => a + b, 0) / responseTimes.length;
+    const r2 = this.computeR2(yTrue, yPred);
+    const calibration = this.computeCalibrationECE(yTrue, yPred, confidences);
     
-    // Interpretability score for LSTM only (lower due to black box nature)
+    // Interpretability score for Bi-LSTM only (lower due to black box nature)
     const interpretability = 35;
 
     return {
@@ -325,34 +368,201 @@ export class ModelEvaluator {
       interpretability,
       meanAbsoluteError: meanError,
       rootMeanSquareError: rmse,
+      r2,
+      calibrationECE: calibration.ece,
+      calibrationBins: calibration.bins,
       predictions
     };
   }
 
-  private compareModels(hybrid: ModelPerformance, lstm: ModelPerformance): ComparisonResults {
-    const accuracyImprovement = ((hybrid.accuracy - lstm.accuracy) / lstm.accuracy) * 100;
-    const responseTimeImprovement = ((lstm.responseTime - hybrid.responseTime) / lstm.responseTime) * 100;
-    const interpretabilityImprovement = ((hybrid.interpretability - lstm.interpretability) / lstm.interpretability) * 100;
+  private async evaluatePhysicsOnly(): Promise<ModelPerformance> {
+    const predictions: any[] = [];
+    const responseTimes: number[] = [];
+    let totalError = 0;
+    let totalSquaredError = 0;
+    const yTrue: number[] = [];
+    const yPred: number[] = [];
 
-    let winner: 'hybrid' | 'lstm' | 'tie' = 'tie';
-    
-    // Weighted scoring: 40% accuracy, 20% speed, 40% interpretability
-    const hybridScore = hybrid.accuracy * 0.4 + (100 - hybrid.responseTime) * 0.2 + hybrid.interpretability * 0.4;
-    const lstmScore = lstm.accuracy * 0.4 + (100 - lstm.responseTime) * 0.2 + lstm.interpretability * 0.4;
-    
-    if (hybridScore > lstmScore + 2) winner = 'hybrid';
-    else if (lstmScore > hybridScore + 2) winner = 'lstm';
+    for (const scenario of this.testScenarios) {
+      const startTime = performance.now();
+      const physics = this.physicsModel.predict(scenario.inputs.currentState);
+      const endTime = performance.now();
+      const responseTime = endTime - startTime;
+      responseTimes.push(responseTime);
+
+      const error = Math.abs(physics.temperature - scenario.groundTruth.temperature) / scenario.groundTruth.temperature;
+      totalError += error;
+      totalSquaredError += error * error;
+      yTrue.push(scenario.groundTruth.temperature);
+      yPred.push(physics.temperature);
+
+      predictions.push({
+        scenario: scenario.name,
+        predicted: {
+          temperature: physics.temperature,
+          wearRate: physics.wearRate,
+          predictedLapsRemaining: physics.predictedLapsRemaining,
+        },
+        actual: scenario.groundTruth,
+        error,
+        responseTime,
+      });
+    }
+
+    const meanError = totalError / this.testScenarios.length;
+    const rmse = Math.sqrt(totalSquaredError / this.testScenarios.length);
+    const accuracy = Math.max(0, (1 - meanError) * 100);
+    const avgResponseTime = responseTimes.reduce((a, b) => a + b, 0) / responseTimes.length;
+    const r2 = this.computeR2(yTrue, yPred);
+
+    return {
+      accuracy,
+      responseTime: avgResponseTime,
+      interpretability: 95,
+      meanAbsoluteError: meanError,
+      rootMeanSquareError: rmse,
+      r2,
+      predictions,
+    } as ModelPerformance;
+  }
+
+  private async evaluateGRUModel(): Promise<ModelPerformance> {
+    const predictions: any[] = [];
+    const responseTimes: number[] = [];
+    let totalError = 0;
+    let totalSquaredError = 0;
+    const yTrue: number[] = [];
+    const yPred: number[] = [];
+    const confidences: number[] = [];
+
+    for (const scenario of this.testScenarios) {
+      const startTime = performance.now();
+      const prediction = this.gruModel.predict(scenario.inputs.historicalSequence as any);
+      const endTime = performance.now();
+      const responseTime = endTime - startTime;
+      responseTimes.push(responseTime);
+
+      const error = Math.abs(prediction.temperature - scenario.groundTruth.temperature) / scenario.groundTruth.temperature;
+      totalError += error;
+      totalSquaredError += error * error;
+      yTrue.push(scenario.groundTruth.temperature);
+      yPred.push(prediction.temperature);
+      confidences.push(prediction.confidence ?? 0.5);
+
+      predictions.push({
+        scenario: scenario.name,
+        predicted: prediction,
+        actual: scenario.groundTruth,
+        error,
+        responseTime,
+      });
+    }
+
+    const meanError = totalError / this.testScenarios.length;
+    const rmse = Math.sqrt(totalSquaredError / this.testScenarios.length);
+    const accuracy = Math.max(0, (1 - meanError) * 100);
+    const avgResponseTime = responseTimes.reduce((a, b) => a + b, 0) / responseTimes.length;
+    const r2 = this.computeR2(yTrue, yPred);
+    const calibration = this.computeCalibrationECE(yTrue, yPred, confidences);
+
+    return {
+      accuracy,
+      responseTime: avgResponseTime,
+      interpretability: 45,
+      meanAbsoluteError: meanError,
+      rootMeanSquareError: rmse,
+      r2,
+      calibrationECE: calibration.ece,
+      calibrationBins: calibration.bins,
+      predictions,
+    } as ModelPerformance;
+  }
+
+  private async evaluateTCNModel(): Promise<ModelPerformance> {
+    const predictions: any[] = [];
+    const responseTimes: number[] = [];
+    let totalError = 0;
+    let totalSquaredError = 0;
+    const yTrue: number[] = [];
+    const yPred: number[] = [];
+    const confidences: number[] = [];
+
+    for (const scenario of this.testScenarios) {
+      const startTime = performance.now();
+      const prediction = this.tcnModel.predict(scenario.inputs.historicalSequence as any);
+      const endTime = performance.now();
+      const responseTime = endTime - startTime;
+      responseTimes.push(responseTime);
+
+      const error = Math.abs(prediction.temperature - scenario.groundTruth.temperature) / scenario.groundTruth.temperature;
+      totalError += error;
+      totalSquaredError += error * error;
+      yTrue.push(scenario.groundTruth.temperature);
+      yPred.push(prediction.temperature);
+      confidences.push(prediction.confidence ?? 0.5);
+
+      predictions.push({
+        scenario: scenario.name,
+        predicted: prediction,
+        actual: scenario.groundTruth,
+        error,
+        responseTime,
+      });
+    }
+
+    const meanError = totalError / this.testScenarios.length;
+    const rmse = Math.sqrt(totalSquaredError / this.testScenarios.length);
+    const accuracy = Math.max(0, (1 - meanError) * 100);
+    const avgResponseTime = responseTimes.reduce((a, b) => a + b, 0) / responseTimes.length;
+    const r2 = this.computeR2(yTrue, yPred);
+    const calibration = this.computeCalibrationECE(yTrue, yPred, confidences);
+
+    return {
+      accuracy,
+      responseTime: avgResponseTime,
+      interpretability: 40,
+      meanAbsoluteError: meanError,
+      rootMeanSquareError: rmse,
+      r2,
+      calibrationECE: calibration.ece,
+      calibrationBins: calibration.bins,
+      predictions,
+    } as ModelPerformance;
+  }
+
+  private compareModels(hybrid: ModelPerformance, lstm: ModelPerformance, physics: ModelPerformance, gru: ModelPerformance, tcn: ModelPerformance): ComparisonResults {
+    const models = { hybrid, lstm, physics, gru, tcn } as const;
+
+    const scores = Object.fromEntries(
+      Object.entries(models).map(([k, m]) => [
+        k,
+        m.accuracy * 0.4 + (100 - Math.min(100, m.responseTime)) * 0.2 + m.interpretability * 0.4
+      ])
+    ) as Record<string, number>;
+
+    const winnerKey = (Object.keys(scores) as Array<keyof typeof scores>).reduce((a, b) => (scores[a] >= scores[b] ? a : b));
+    const winner = (winnerKey === 'hybrid' || winnerKey === 'lstm' || winnerKey === 'physics' || winnerKey === 'gru' || winnerKey === 'tcn') ? winnerKey : 'tie';
+
+    const accuracyImprovement = ((hybrid.accuracy - lstm.accuracy) / Math.max(1e-6, lstm.accuracy)) * 100;
+    const responseTimeImprovement = ((lstm.responseTime - hybrid.responseTime) / Math.max(1e-6, lstm.responseTime)) * 100;
+    const interpretabilityImprovement = ((hybrid.interpretability - lstm.interpretability) / Math.max(1e-6, lstm.interpretability)) * 100;
 
     let summary = `Comparison Results:\n`;
-    summary += `- Hybrid Digital Twin: ${hybrid.accuracy.toFixed(1)}% accuracy, ${hybrid.responseTime.toFixed(1)}ms response, ${hybrid.interpretability}/100 interpretability\n`;
-    summary += `- LSTM Only: ${lstm.accuracy.toFixed(1)}% accuracy, ${lstm.responseTime.toFixed(1)}ms response, ${lstm.interpretability}/100 interpretability\n`;
+    summary += `- Hybrid Digital Twin: ${hybrid.accuracy.toFixed(1)}% acc, R²=${hybrid.r2.toFixed(2)}, ${hybrid.responseTime.toFixed(1)}ms, Interp ${hybrid.interpretability}/100\n`;
+    summary += `- Bi-LSTM Only: ${lstm.accuracy.toFixed(1)}% acc, R²=${lstm.r2.toFixed(2)}, ${lstm.responseTime.toFixed(1)}ms, Interp ${lstm.interpretability}/100\n`;
+    summary += `- Physics Only: ${physics.accuracy.toFixed(1)}% acc, R²=${physics.r2.toFixed(2)}, ${physics.responseTime.toFixed(1)}ms, Interp ${physics.interpretability}/100\n`;
+    summary += `- GRU: ${gru.accuracy.toFixed(1)}% acc, R²=${gru.r2.toFixed(2)}, ${gru.responseTime.toFixed(1)}ms, Interp ${gru.interpretability}/100\n`;
+    summary += `- TCN: ${tcn.accuracy.toFixed(1)}% acc, R²=${tcn.r2.toFixed(2)}, ${tcn.responseTime.toFixed(1)}ms, Interp ${tcn.interpretability}/100\n`;
     summary += `- Winner: ${winner.toUpperCase()}\n`;
-    summary += `- Improvements: Accuracy ${accuracyImprovement.toFixed(1)}%, Speed ${responseTimeImprovement.toFixed(1)}%, Interpretability ${interpretabilityImprovement.toFixed(1)}%`;
+    summary += `- Vs Bi-LSTM: Accuracy ${accuracyImprovement.toFixed(1)}%, Speed ${responseTimeImprovement.toFixed(1)}%, Interpretability ${interpretabilityImprovement.toFixed(1)}%`;
 
     return {
       hybridTwin: hybrid,
       lstmOnly: lstm,
-      winner,
+      physicsOnly: physics,
+      gru,
+      tcn,
+      winner: winner as any,
       improvements: {
         accuracy: accuracyImprovement,
         responseTime: responseTimeImprovement,
@@ -371,31 +581,64 @@ export class ModelEvaluator {
     
     report += `## Detailed Performance Analysis\n\n`;
     
-    report += `### Hybrid Digital Twin (Physics + LSTM)\n`;
+    report += `### Hybrid Digital Twin (Physics + Bi-LSTM + Attention)\n`;
     report += `- **Prediction Accuracy**: ${results.hybridTwin.accuracy.toFixed(2)}%\n`;
     report += `- **Response Time**: ${results.hybridTwin.responseTime.toFixed(2)}ms\n`;
     report += `- **Interpretability Score**: ${results.hybridTwin.interpretability}/100\n`;
     report += `- **Mean Absolute Error**: ${(results.hybridTwin.meanAbsoluteError * 100).toFixed(2)}%\n`;
     report += `- **Root Mean Square Error**: ${(results.hybridTwin.rootMeanSquareError * 100).toFixed(2)}%\n\n`;
+    report += `- **R²**: ${results.hybridTwin.r2.toFixed(3)}\n`;
+    if (results.hybridTwin.calibrationECE !== undefined) {
+      report += `- **Calibration (ECE)**: ${results.hybridTwin.calibrationECE.toFixed(3)}\n\n`;
+    }
     
-    report += `### LSTM-Only Model\n`;
+    report += `### Bi-LSTM-Only Model\n`;
     report += `- **Prediction Accuracy**: ${results.lstmOnly.accuracy.toFixed(2)}%\n`;
     report += `- **Response Time**: ${results.lstmOnly.responseTime.toFixed(2)}ms\n`;
     report += `- **Interpretability Score**: ${results.lstmOnly.interpretability}/100\n`;
     report += `- **Mean Absolute Error**: ${(results.lstmOnly.meanAbsoluteError * 100).toFixed(2)}%\n`;
-    report += `- **Root Mean Square Error**: ${(results.lstmOnly.rootMeanSquareError * 100).toFixed(2)}%\n\n`;
+    report += `- **Root Mean Square Error**: ${(results.lstmOnly.rootMeanSquareError * 100).toFixed(2)}%\n`;
+    report += `- **R²**: ${results.lstmOnly.r2.toFixed(3)}\n`;
+    if (results.lstmOnly.calibrationECE !== undefined) {
+      report += `- **Calibration (ECE)**: ${results.lstmOnly.calibrationECE.toFixed(3)}\n`;
+    }
+    report += `\n`;
+
+    report += `### Physics-Only Baseline\n`;
+    report += `- **Prediction Accuracy**: ${results.physicsOnly.accuracy.toFixed(2)}%\n`;
+    report += `- **Response Time**: ${results.physicsOnly.responseTime.toFixed(2)}ms\n`;
+    report += `- **Interpretability Score**: ${results.physicsOnly.interpretability}/100\n`;
+    report += `- **MAE**: ${(results.physicsOnly.meanAbsoluteError * 100).toFixed(2)}%\n`;
+    report += `- **RMSE**: ${(results.physicsOnly.rootMeanSquareError * 100).toFixed(2)}%\n`;
+    report += `- **R²**: ${results.physicsOnly.r2.toFixed(3)}\n\n`;
+
+    report += `### GRU Baseline\n`;
+    report += `- **Prediction Accuracy**: ${results.gru.accuracy.toFixed(2)}%\n`;
+    report += `- **Response Time**: ${results.gru.responseTime.toFixed(2)}ms\n`;
+    report += `- **Interpretability Score**: ${results.gru.interpretability}/100\n`;
+    report += `- **MAE**: ${(results.gru.meanAbsoluteError * 100).toFixed(2)}%\n`;
+    report += `- **RMSE**: ${(results.gru.rootMeanSquareError * 100).toFixed(2)}%\n`;
+    report += `- **R²**: ${results.gru.r2.toFixed(3)}\n\n`;
+
+    report += `### TCN Baseline\n`;
+    report += `- **Prediction Accuracy**: ${results.tcn.accuracy.toFixed(2)}%\n`;
+    report += `- **Response Time**: ${results.tcn.responseTime.toFixed(2)}ms\n`;
+    report += `- **Interpretability Score**: ${results.tcn.interpretability}/100\n`;
+    report += `- **MAE**: ${(results.tcn.meanAbsoluteError * 100).toFixed(2)}%\n`;
+    report += `- **RMSE**: ${(results.tcn.rootMeanSquareError * 100).toFixed(2)}%\n`;
+    report += `- **R²**: ${results.tcn.r2.toFixed(3)}\n\n`;
     
     report += `## Key Findings\n\n`;
     
     if (results.winner === 'hybrid') {
-      report += `✅ **Hybrid Digital Twin outperforms LSTM-only model**\n`;
+      report += `✅ **Hybrid Digital Twin outperforms Bi-LSTM-only model**\n`;
       report += `- ${Math.abs(results.improvements.accuracy).toFixed(1)}% better accuracy\n`;
       report += `- ${Math.abs(results.improvements.interpretability).toFixed(1)}% better interpretability\n`;
       if (results.improvements.responseTime > 0) {
         report += `- ${results.improvements.responseTime.toFixed(1)}% faster response time\n`;
       }
     } else if (results.winner === 'lstm') {
-      report += `⚠️ **LSTM-only model outperforms Hybrid Digital Twin**\n`;
+      report += `⚠️ **Bi-LSTM-only model outperforms Hybrid Digital Twin**\n`;
       report += `This may indicate need for physics model refinement or better integration.\n`;
     } else {
       report += `🤝 **Models show similar overall performance**\n`;
@@ -413,5 +656,33 @@ export class ModelEvaluator {
   // Get test scenarios for inspection
   getTestScenarios(): TestScenario[] {
     return this.testScenarios;
+  }
+
+  private computeR2(yTrue: number[], yPred: number[]) {
+    const n = yTrue.length;
+    if (n === 0) return 0;
+    const mean = yTrue.reduce((a, b) => a + b, 0) / n;
+    const ssTot = yTrue.reduce((s, yi) => s + Math.pow(yi - mean, 2), 0);
+    const ssRes = yTrue.reduce((s, yi, i) => s + Math.pow(yi - yPred[i], 2), 0);
+    return ssTot === 0 ? 0 : 1 - ssRes / ssTot;
+  }
+
+  private computeCalibrationECE(yTrue: number[], yPred: number[], conf: number[]) {
+    // For regression, define correctness within a relative error tolerance and compare to confidence
+    const tol = 0.1; // 10% error threshold considered correct
+    const bins = [0, 0.2, 0.4, 0.6, 0.8, 1.0];
+    const out: Array<{ bin: string; confidenceAvg: number; accuracy: number; count: number }> = [];
+    let ece = 0;
+    for (let i = 0; i < bins.length - 1; i++) {
+      const lo = bins[i];
+      const hi = bins[i + 1];
+      const idxs = conf.map((c, idx) => ({ c, idx })).filter(o => o.c >= lo && o.c < hi).map(o => o.idx);
+      const count = idxs.length;
+      const confidenceAvg = count ? idxs.reduce((s, j) => s + conf[j], 0) / count : 0;
+      const acc = count ? idxs.reduce((s, j) => s + (Math.abs(yPred[j] - yTrue[j]) / Math.max(1e-6, yTrue[j]) <= tol ? 1 : 0), 0) / count : 0;
+      ece += (count / Math.max(1, conf.length)) * Math.abs(acc - confidenceAvg);
+      out.push({ bin: `${lo.toFixed(1)}-${hi.toFixed(1)}`, confidenceAvg, accuracy: acc, count });
+    }
+    return { ece, bins: out };
   }
 } 
