@@ -232,8 +232,3 @@ npm run preview
 This project was developed manually with engineering effort, but certain parts of the implementation, debugging, and structuring were assisted using **Cursor AI** and **Lovable AI** to accelerate development and improve code quality.
 
 ---
-
-
-
-Just tell me!
-
